@@ -169,7 +169,6 @@ public final class TvControls {
         private final List<Target> targets = new ArrayList<>();
         private final List<Target> scrollers = new ArrayList<>();
         private final Runnable refreshAfterAction;
-        private final Runnable longVerticalPress;
         private final EnumMap<Zone, Target> remembered = new EnumMap<>(Zone.class);
         private final HashSet<Integer> interceptedKeys = new HashSet<>();
         private Zone zone = Zone.CONTENT;
@@ -186,13 +185,6 @@ public final class TvControls {
             this.ring = new FocusRing(decor.getResources().getDisplayMetrics().density);
             this.refreshAfterAction = () -> {
                 if (active && this.decor.isAttachedToWindow()) refresh(true);
-            };
-            this.longVerticalPress = () -> {
-                if (heldVerticalKey == KeyEvent.KEYCODE_UNKNOWN || verticalShortcutTaken || !active
-                        || !this.decor.isAttachedToWindow() || !this.decor.hasWindowFocus()
-                        || imeVisible() || !refresh(true)) return;
-                verticalShortcutTaken = switchZone(outerZone(heldVerticalKey));
-                if (verticalShortcutTaken && verticalOrigin != null) remembered.put(Zone.CONTENT, verticalOrigin);
             };
         }
 
@@ -213,7 +205,10 @@ public final class TvControls {
             if (!(vertical || horizontal || confirm || page)) return false;
 
             if (event.getAction() == KeyEvent.ACTION_UP && interceptedKeys.remove(key)) {
-                if (key == heldVerticalKey) cancelVertical();
+                if (key == heldVerticalKey) {
+                    if (!event.isCanceled()) tryVerticalShortcut(event);
+                    cancelVertical();
+                }
                 if (confirm && active && !skipConfirm && !event.isCanceled() && !imeVisible() && refresh(false)) {
                     current.activate(AccessibilityNodeInfo.ACTION_CLICK);
                     scheduleRefresh();
@@ -238,16 +233,12 @@ public final class TvControls {
                     cancelVertical();
                     heldVerticalKey = key;
                     verticalOrigin = zone == Zone.CONTENT ? current : null;
-                    decor.postDelayed(longVerticalPress, ViewConfiguration.getLongPressTimeout());
-                } else if (event.isLongPress()) {
-                    longVerticalPress.run();
+                } else {
+                    tryVerticalShortcut(event);
                 }
                 if (hadFocus && !verticalShortcutTaken) {
                     shortVertical(key);
-                    if (zone == outerZone(key)) {
-                        verticalShortcutTaken = true;
-                        decor.removeCallbacks(longVerticalPress);
-                    }
+                    verticalShortcutTaken = zone == outerZone(key);
                 }
                 return true;
             }
@@ -272,8 +263,17 @@ public final class TvControls {
             return true;
         }
 
+        private void tryVerticalShortcut(KeyEvent event) {
+            // Input can arrive late when the UI is busy; the event timestamps describe the actual hold.
+            boolean held = event.isLongPress()
+                    || event.getEventTime() - event.getDownTime() >= ViewConfiguration.getLongPressTimeout();
+            if (!held || verticalShortcutTaken || !active || !decor.hasWindowFocus()
+                    || imeVisible() || !refresh(true)) return;
+            verticalShortcutTaken = switchZone(outerZone(heldVerticalKey));
+            if (verticalShortcutTaken && verticalOrigin != null) remembered.put(Zone.CONTENT, verticalOrigin);
+        }
+
         private void cancelVertical() {
-            decor.removeCallbacks(longVerticalPress);
             heldVerticalKey = KeyEvent.KEYCODE_UNKNOWN;
             verticalOrigin = null;
             verticalShortcutTaken = false;
@@ -426,7 +426,8 @@ public final class TvControls {
             Rect bounds = new Rect();
             if (!view.getLocalVisibleRect(bounds)) return;
             view.getLocationOnScreen(location);
-            bounds.offset(location[0], location[1]);
+            // The local visible rect uses the view's scrolled content coordinates.
+            bounds.offset(location[0] - view.getScrollX(), location[1] - view.getScrollY());
             if (!bounds.intersect(screen)) return;
 
             if (ComposeNodes.isHost(view)) {
@@ -450,7 +451,7 @@ public final class TvControls {
             Target nearest = null;
             double min = Double.POSITIVE_INFINITY;
             for (Target candidate : targets) {
-                if (candidate == current || candidate.zone != zone) continue;
+                if (candidate.zone != zone) continue;
                 double score = distance(origin, candidate.bounds, direction);
                 if (score < min) {
                     min = score;
@@ -472,13 +473,19 @@ public final class TvControls {
             int main = horizontal
                     ? (forward ? to.left - from.right : from.left - to.right)
                     : (forward ? to.top - from.bottom : from.top - to.bottom);
+            int span = horizontal ? Math.max(from.width(), to.width()) : Math.max(from.height(), to.height());
+            // Slightly staggered neighbors still belong to the same row or column.
+            if (separation >= 0 && main < 0 && Math.abs(centerDelta) < span / 2f) {
+                return Double.POSITIVE_INFINITY;
+            }
             return Math.max(main, 0) + .17 * Math.abs(centerDelta) + .28 * cross + 2.8 * Math.max(separation, 0);
         }
 
         private boolean scroll(int direction) {
             if (zone != Zone.CONTENT || current == null) return false;
             if (pendingScroll != null) return true;
-            final Rect anchor = new Rect(current.bounds);
+            final Target previous = current;
+            final Rect anchor = previous.bounds;
             int pageAction;
             switch (direction) {
                 case KeyEvent.KEYCODE_DPAD_UP: pageAction = AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId(); break;
@@ -496,7 +503,9 @@ public final class TvControls {
                     pendingScroll = () -> {
                         pendingScroll = null;
                         if (!active || !refresh(true) || zone != Zone.CONTENT) return;
-                        Target next = inDirection(anchor, direction);
+                        Rect origin = current.sameControl(previous) ? current.bounds
+                                : scrollEntryBounds(anchor, item.bounds, direction);
+                        Target next = inDirection(origin, direction);
                         if (next != null) {
                             current = next;
                             draw();
@@ -507,6 +516,17 @@ public final class TvControls {
                 }
             }
             return false;
+        }
+
+        private static Rect scrollEntryBounds(Rect anchor, Rect viewport, int direction) {
+            Rect edge = new Rect(anchor);
+            switch (direction) {
+                case KeyEvent.KEYCODE_DPAD_UP: edge.offset(0, viewport.bottom - edge.top); break;
+                case KeyEvent.KEYCODE_DPAD_DOWN: edge.offset(0, viewport.top - edge.bottom); break;
+                case KeyEvent.KEYCODE_DPAD_LEFT: edge.offset(viewport.right - edge.left, 0); break;
+                default: edge.offset(viewport.left - edge.right, 0);
+            }
+            return edge;
         }
 
         private void cancelScroll() {

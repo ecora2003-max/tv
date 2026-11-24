@@ -5,6 +5,7 @@ public final class KeyEvent {
     public static final int ACTION_UP = 1;
     public static final int KEYCODE_DPAD_UP = 19;
     public static final int KEYCODE_DPAD_DOWN = 20;
+    public static final int KEYCODE_DPAD_RIGHT = 22;
     public static final int KEYCODE_MEDIA_PLAY_PAUSE = 85;
     public static final int KEYCODE_MEDIA_NEXT = 87;
     public static final int KEYCODE_MEDIA_PREVIOUS = 88;

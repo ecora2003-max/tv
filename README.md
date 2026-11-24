@@ -33,12 +33,17 @@ Diese APK lässt sich über die Projektversionen **TV-Remote** und **DPad** inst
 ### Aktueller Fernbedienungs-Patch
 
 - **↑ / ↓** bewegen den Fokus beim Drücken. Ist am oberen oder unteren Rand kein weiteres Element erreichbar und kann der Inhalt nicht weiter scrollen, geht der Fokus zur sichtbaren Menüleiste oder zum Miniplayer. **↑ / ↓ halten** wählt diese Leisten weiterhin direkt. Von dort führt die Pfeiltaste Richtung Mitte zurück zur vorherigen Auswahl im Inhalt, sofern sie noch sichtbar ist.
+- Leicht versetzte Schaltflächen derselben Zeile bleiben mit **← / →** erreichbar. **↑ / ↓** führt zur nächsten erreichbaren Zeile oder am Rand zur Leiste.
 - **⏪ / ⏩** und dedizierte Vorheriger-/Nächster-Tasten senden pro Tastendruck einen Titelsprung an die aktive Android-Mediensitzung. Wiedergabe/Pause verarbeitet Android regulär.
 
 ### Verworfene Ansätze
 
 - **Direct Play und Playback-Diagnose.** Ein vermeintlicher Atmos-Fehler beim Einzelstart führte zu einem Versuch mit Katalog-IDs und zu einer Diagnose-APK mit Anzeige der Wiedergabestufe. Der Nutzer stellte fest, dass nur als anstößig gekennzeichnete Titel betroffen waren. Nach der Einstellung **Immer** funktionierte der Klick. Beide Versuche wurden bei der weiteren Arbeit durch die vorherige TV-Remote-Basis ersetzt. Die Inhaltsprüfung der App wurde nicht umgangen.
 - **Andere TV-Clients.** [AM for TV 0.7.0](https://github.com/Sam20060720/am_atv) ist ein eigenständiger Android-TV-Client mit Atmos-Option und ARMv7-Bibliotheken. Er verwendet einen anderen Wiedergabepfad. Das Projekt baut auf der offiziellen Android-App auf, weil deren gepatchte Atmos-Wiedergabe auf dem Philips bestätigt wurde.
+
+## Prüfung im Android-TV-Emulator
+
+Die Prüfung lief auf Android TV 12 (x86) mit einer Test-App, die den Fernbedienungs-Patch über `TvControls.install` und eine aktive Android-Mediensitzung verwendet. ADB-Tastendrücke prüften OK, kurze und lange Pfeiltasten, Fokuswiederherstellung, Scrollen über mehrere Seiten und die Medienbefehle. Der Test mit der Apple-Music-APK war durch wiederholte Neustarts des Android-Systemprozesses im ARMv7-Emulator blockiert.
 
 ## Test auf dem Philips
 
