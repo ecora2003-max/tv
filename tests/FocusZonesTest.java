@@ -22,6 +22,9 @@ class FocusZonesTest {
         expectZone(zone, screen, partialCover, 971, "CONTENT");
         expectZone(zone, screen, playPause, 971, "PLAYER");
         expectZone(zone, screen, nowPlaying, 971, "PLAYER");
+        Rect albumRow = new Rect(20, 928, 1900, 1009);
+        expectZone(zone, screen, albumRow, 971, "CONTENT");
+        expectZone(zone, screen, new Rect(20, 48, 1900, 113), 971, "CONTENT");
         expectZone(zone, screen, playPause, null, "CONTENT");
         if (!(Boolean) anchor.invoke(null, screen, playPause)) throw new AssertionError("Play button should anchor the bar");
         if ((Boolean) anchor.invoke(null, screen, partialCover)) throw new AssertionError("A cover must not anchor the bar");
@@ -45,6 +48,26 @@ class FocusZonesTest {
         expectDirection(distance, rowItem, offsetItem, KeyEvent.KEYCODE_DPAD_DOWN, false);
         expectDirection(distance, rowItem, offsetItem, KeyEvent.KEYCODE_DPAD_RIGHT, true);
         expectDirection(distance, rowItem, nextRow, KeyEvent.KEYCODE_DPAD_DOWN, true);
+        expectDirection(distance, rowItem, new Rect(490, 340, 850, 404), KeyEvent.KEYCODE_DPAD_RIGHT, false);
+
+        Method visible = focus.getDeclaredMethod("hasVisibleContent", Rect.class, Rect.class, int.class);
+        visible.setAccessible(true);
+        Rect viewport = new Rect(0, 120, 1920, 920);
+        if ((Boolean) visible.invoke(null, albumRow, viewport, 26)
+                || (Boolean) visible.invoke(null, new Rect(20, 904, 1900, 984), viewport, 26)
+                || (Boolean) visible.invoke(null, new Rect(20, 1060, 1900, 1080), screen, 26)
+                || !(Boolean) visible.invoke(null, new Rect(20, 854, 1900, 934), viewport, 26)) {
+            throw new AssertionError("Focus targets must be substantially visible above the player");
+        }
+        Method scrollDistance = focus.getDeclaredMethod("rowScrollDistance", int.class, Rect.class,
+                Rect.class, boolean.class, int.class);
+        scrollDistance.setAccessible(true);
+        Rect nearPlayer = new Rect(20, 840, 1900, 905);
+        Rect underPlayer = new Rect(20, 960, 1900, 1025);
+        float step = (Float) scrollDistance.invoke(null, nearPlayer.height(), underPlayer, viewport, true, 26);
+        if (step < 105 || step >= viewport.height() / 4f) {
+            throw new AssertionError("Scroll should reveal the concealed row within a fraction of the viewport");
+        }
         System.out.println("Focus zone classification checks passed");
     }
 

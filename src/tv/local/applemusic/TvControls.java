@@ -12,9 +12,13 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.media.AudioManager;
+import android.media.session.MediaController;
+import android.media.session.PlaybackState;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
@@ -22,6 +26,9 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeProvider;
+import android.view.inputmethod.InputMethodManager;
+import android.webkit.WebView;
+import android.widget.EditText;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -57,20 +64,33 @@ public final class TvControls {
             activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
         }
         Focus focus = new Focus((ViewGroup) window.getDecorView());
+        LoginPointer pointer = new LoginPointer(activity, window, focus);
         AudioManager audio = activity.getSystemService(AudioManager.class);
-        TrackKeys trackKeys = audio == null ? null : new TrackKeys(key -> dispatchTrackKey(audio, key));
+        TrackKeys trackKeys = audio == null ? null : new TrackKeys(key -> dispatchMediaKey(activity, audio, key));
         focus.decor.getViewTreeObserver().addOnWindowFocusChangeListener(hasFocus -> {
             if (!hasFocus) {
                 focus.hide();
+                pointer.hide();
                 if (trackKeys != null) trackKeys.clear();
             }
         });
         window.setCallback((Window.Callback) Proxy.newProxyInstance(
                 TvControls.class.getClassLoader(), new Class<?>[] {Window.Callback.class},
-                new RemoteCallback(delegate, focus, trackKeys)));
+                new RemoteCallback(delegate, focus, trackKeys, pointer)));
     }
 
-    private static void dispatchTrackKey(AudioManager audio, int key) {
+    private static void dispatchMediaKey(Activity activity, AudioManager audio, int key) {
+        if (key == KeyEvent.KEYCODE_MEDIA_STOP) {
+            MediaController controller = activity.getMediaController();
+            if (controller != null && activity.getPackageName().equals(controller.getPackageName())) {
+                PlaybackState state = controller.getPlaybackState();
+                if (state != null && (state.getActions() & PlaybackState.ACTION_STOP) != 0) {
+                    controller.getTransportControls().stop();
+                    return;
+                }
+            }
+            key = KeyEvent.KEYCODE_MEDIA_PAUSE;
+        }
         // Send one complete press to the system's active media session.
         long now = SystemClock.uptimeMillis();
         audio.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, key, 0));
@@ -91,11 +111,13 @@ public final class TvControls {
         private final Window.Callback delegate;
         private final Focus focus;
         private final TrackKeys trackKeys;
+        private final LoginPointer pointer;
 
-        RemoteCallback(Window.Callback delegate, Focus focus, TrackKeys trackKeys) {
+        RemoteCallback(Window.Callback delegate, Focus focus, TrackKeys trackKeys, LoginPointer pointer) {
             this.delegate = delegate;
             this.focus = focus;
             this.trackKeys = trackKeys;
+            this.pointer = pointer;
         }
 
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
@@ -106,9 +128,14 @@ public final class TvControls {
                     if (event.getAction() == KeyEvent.ACTION_UP && focus.active) focus.scheduleRefresh();
                     return true;
                 }
+                if (pointer.onKey(event)) return true;
                 if (focus.onKey(event)) return true;
+                if (focus.composeLogin && pointer.onKey(event)) return true;
             }
-            if (name.equals("dispatchTouchEvent")) focus.hide();
+            if (name.equals("dispatchTouchEvent")) {
+                focus.hide();
+                pointer.hide();
+            }
             try {
                 return method.invoke(delegate, args);
             } catch (InvocationTargetException error) {
@@ -117,11 +144,149 @@ public final class TvControls {
         }
     }
 
+    private static boolean isConfirm(int key) {
+        return key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER
+                || key == KeyEvent.KEYCODE_NUMPAD_ENTER || key == KeyEvent.KEYCODE_BUTTON_A;
+    }
+
+    private static void touch(Window window, long downTime, long time, int action, float x, float y) {
+        MotionEvent event = MotionEvent.obtain(downTime, time, action, x, y, 0);
+        event.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
+        try {
+            window.superDispatchTouchEvent(event);
+        } finally {
+            event.recycle();
+        }
+    }
+
+    private static final class LoginPointer {
+        private final Window window;
+        private final Focus focus;
+        private final boolean authActivity;
+        private final float density;
+        private final PointerDrawable cursor = new PointerDrawable();
+        private final HashSet<Integer> pressed = new HashSet<>();
+        private float x;
+        private float y;
+        private boolean clickArmed;
+
+        LoginPointer(Activity activity, Window window, Focus focus) {
+            this.window = window;
+            this.focus = focus;
+            density = focus.decor.getResources().getDisplayMetrics().density;
+            String name = activity.getClass().getName();
+            authActivity = name.equals("com.apple.android.music.navigation.deeplink.SdkAuthActivity")
+                    || name.equals("com.apple.android.music.commerce.activities.SonosAuthActivity");
+        }
+
+        boolean onKey(KeyEvent event) {
+            int key = event.getKeyCode();
+            boolean direction = key >= KeyEvent.KEYCODE_DPAD_UP && key <= KeyEvent.KEYCODE_DPAD_RIGHT;
+            if (key == KeyEvent.KEYCODE_BACK) {
+                hide();
+                return false;
+            }
+            if (!direction && !isConfirm(key)) return false;
+            boolean release = event.getAction() == KeyEvent.ACTION_UP;
+            boolean ownedRelease = release && pressed.remove(key);
+            if (release && !ownedRelease) return false;
+            if (focus.imeVisible() || !loginVisible()) {
+                hide();
+                return ownedRelease;
+            }
+            if (release) {
+                if (isConfirm(key)) {
+                    if (clickArmed && !event.isCanceled() && cursor.getCallback() != null) {
+                        long now = SystemClock.uptimeMillis();
+                        touch(window, now, now, MotionEvent.ACTION_DOWN, x, y);
+                        touch(window, now, now, MotionEvent.ACTION_UP, x, y);
+                    }
+                    clickArmed = false;
+                }
+                return true;
+            }
+            if (event.getAction() != KeyEvent.ACTION_DOWN || focus.decor.getWidth() == 0
+                    || focus.decor.getHeight() == 0) return false;
+            pressed.add(key);
+            if (isConfirm(key) && event.getRepeatCount() == 0) clickArmed = cursor.getCallback() != null;
+            if (cursor.getCallback() == null) {
+                focus.hide();
+                x = focus.decor.getWidth() / 2f;
+                y = focus.decor.getHeight() / 2f;
+                focus.decor.getOverlay().add(cursor);
+            }
+            float step = density * (event.getRepeatCount() >= 4 ? 52 : 22);
+            if (key == KeyEvent.KEYCODE_DPAD_LEFT) x -= step;
+            if (key == KeyEvent.KEYCODE_DPAD_RIGHT) x += step;
+            if (key == KeyEvent.KEYCODE_DPAD_UP) y -= step;
+            if (key == KeyEvent.KEYCODE_DPAD_DOWN) y += step;
+            x = Math.max(0, Math.min(focus.decor.getWidth() - 1, x));
+            y = Math.max(0, Math.min(focus.decor.getHeight() - 1, y));
+            int radius = Math.round(density * 9);
+            cursor.setBounds((int) x - radius, (int) y - radius, (int) x + radius, (int) y + radius);
+            return true;
+        }
+
+        private boolean loginVisible() {
+            if (authActivity || hasLoginForm(focus.decor)) return true;
+            if (!focus.composeLogin) return false;
+            focus.refresh(false);
+            return focus.composeLogin;
+        }
+
+        private static boolean hasLoginForm(View view) {
+            if (!view.isShown() || view.getWidth() == 0 || view.getHeight() == 0) return false;
+            if (view instanceof WebView && isSignInUrl(((WebView) view).getUrl())) return true;
+            if (view instanceof EditText && ((EditText) view).getTransformationMethod()
+                    instanceof android.text.method.PasswordTransformationMethod) return true;
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int i = 0; i < group.getChildCount(); i++) {
+                    if (hasLoginForm(group.getChildAt(i))) return true;
+                }
+            }
+            return false;
+        }
+
+        private static boolean isSignInUrl(String url) {
+            if (url == null) return false;
+            Uri uri = Uri.parse(url);
+            if (!"https".equalsIgnoreCase(uri.getScheme())) return false;
+            String host = uri.getHost();
+            if ("idmsa.apple.com".equalsIgnoreCase(host) || "appleid.apple.com".equalsIgnoreCase(host)
+                    || "account.apple.com".equalsIgnoreCase(host)) return true;
+            String path = uri.getPath();
+            return "buy.itunes.apple.com".equalsIgnoreCase(host) && path != null
+                    && path.toLowerCase(java.util.Locale.ROOT).contains("authenticate");
+        }
+
+        void hide() {
+            clickArmed = false;
+            if (cursor.getCallback() != null) focus.decor.getOverlay().remove(cursor);
+        }
+    }
+
+    private static final class PointerDrawable extends Drawable {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        @Override public void draw(Canvas canvas) {
+            Rect bounds = getBounds();
+            paint.setColor(Color.BLACK);
+            canvas.drawCircle(bounds.centerX(), bounds.centerY(), bounds.width() / 2f, paint);
+            paint.setColor(0xff93e5ff);
+            canvas.drawCircle(bounds.centerX(), bounds.centerY(), bounds.width() / 3f, paint);
+        }
+
+        @Override public void setAlpha(int alpha) {}
+        @Override public void setColorFilter(ColorFilter filter) {}
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
     static final class TrackKeys {
-        private final IntConsumer skipTrack;
+        private final IntConsumer mediaCommand;
         private final HashMap<Integer, Long> presses = new HashMap<>();
 
-        TrackKeys(IntConsumer skipTrack) { this.skipTrack = skipTrack; }
+        TrackKeys(IntConsumer mediaCommand) { this.mediaCommand = mediaCommand; }
 
         boolean onKey(KeyEvent event) {
             int key = event.getKeyCode();
@@ -137,6 +302,9 @@ public final class TvControls {
                 case KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD:
                     trackKey = KeyEvent.KEYCODE_MEDIA_PREVIOUS;
                     break;
+                case KeyEvent.KEYCODE_MEDIA_STOP:
+                    trackKey = KeyEvent.KEYCODE_MEDIA_STOP;
+                    break;
                 default:
                     return false;
             }
@@ -148,7 +316,7 @@ public final class TvControls {
                 Long downTime = presses.get(key);
                 if (downTime != null && downTime == event.getDownTime()) {
                     presses.remove(key);
-                    if (!event.isCanceled()) skipTrack.accept(trackKey);
+                    if (!event.isCanceled()) mediaCommand.accept(trackKey);
                 }
                 return true;
             }
@@ -165,8 +333,11 @@ public final class TvControls {
         private final ViewGroup decor;
         private final FocusRing ring;
         private final Rect screen = new Rect();
+        private final Rect contentViewport = new Rect();
+        private final int minimumVisibleHeight;
         private final int[] location = new int[2];
         private final List<Target> targets = new ArrayList<>();
+        private final List<Target> obscuredContent = new ArrayList<>();
         private final List<Target> scrollers = new ArrayList<>();
         private final Runnable refreshAfterAction;
         private final EnumMap<Zone, Target> remembered = new EnumMap<>(Zone.class);
@@ -174,6 +345,7 @@ public final class TvControls {
         private Zone zone = Zone.CONTENT;
         private Target current;
         private boolean active;
+        private boolean composeLogin;
         private int heldVerticalKey = KeyEvent.KEYCODE_UNKNOWN;
         private Target verticalOrigin;
         private boolean verticalShortcutTaken;
@@ -182,7 +354,9 @@ public final class TvControls {
 
         Focus(ViewGroup decor) {
             this.decor = decor;
-            this.ring = new FocusRing(decor.getResources().getDisplayMetrics().density);
+            float density = decor.getResources().getDisplayMetrics().density;
+            this.ring = new FocusRing(density);
+            this.minimumVisibleHeight = Math.round(26f * density);
             this.refreshAfterAction = () -> {
                 if (active && this.decor.isAttachedToWindow()) refresh(true);
             };
@@ -199,8 +373,7 @@ public final class TvControls {
             }
             final boolean vertical = key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN;
             final boolean horizontal = key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT;
-            final boolean confirm = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER
-                    || key == KeyEvent.KEYCODE_NUMPAD_ENTER || key == KeyEvent.KEYCODE_BUTTON_A;
+            final boolean confirm = isConfirm(key);
             final boolean page = key == KeyEvent.KEYCODE_PAGE_UP || key == KeyEvent.KEYCODE_PAGE_DOWN;
             if (!(vertical || horizontal || confirm || page)) return false;
 
@@ -226,7 +399,9 @@ public final class TvControls {
 
             boolean hadFocus = current != null && active;
             active = true;
-            if (!refresh(true)) return !initialPress;
+            boolean hasFocus = refresh(true);
+            if (composeLogin) return false;
+            if (!hasFocus) return !initialPress;
             interceptedKeys.add(key);
             if (vertical) {
                 if (initialPress) {
@@ -255,7 +430,7 @@ public final class TvControls {
             if (!hadFocus) return true;
             if (page) {
                 if (zone == Zone.CONTENT) {
-                    scroll(key == KeyEvent.KEYCODE_PAGE_UP ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_DOWN);
+                    scroll(key == KeyEvent.KEYCODE_PAGE_UP ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_DOWN, true);
                 }
             } else {
                 moveWithinZone(key);
@@ -300,7 +475,7 @@ public final class TvControls {
 
         private boolean moveWithinZone(int key) {
             Target next = inDirection(current.bounds, key);
-            if (next == null) return scroll(key);
+            if (next == null) return scroll(key, false);
             cancelScroll();
             current = next;
             draw();
@@ -325,8 +500,10 @@ public final class TvControls {
             screen.set(location[0], location[1], location[0] + decor.getWidth(), location[1] + decor.getHeight());
             targets.clear();
             scrollers.clear();
+            composeLogin = false;
             collect(decor, true);
             classifyZones();
+            clipContentTargets();
             Target retained = null;
             if (current != null) {
                 for (Target item : targets) {
@@ -386,15 +563,50 @@ public final class TvControls {
 
         private static Zone zoneFor(Rect screen, Rect bounds, Integer playerBaseline) {
             if (bounds.centerY() <= screen.top + screen.height() * .135f
-                    && bounds.height() < screen.height() * .16f) return Zone.TOP;
+                    && bounds.height() < screen.height() * .16f
+                    && bounds.width() < screen.width() * .55f) return Zone.TOP;
             if (playerBaseline != null
                     && bounds.height() < screen.height() * .16f
+                    && bounds.width() < screen.width() * .55f
                     && Math.abs(bounds.centerY() - playerBaseline) <= Math.max(12f, screen.height() * .04f)
                     && bounds.centerX() >= screen.left + screen.width() * .09f
                     && bounds.centerX() <= screen.right - screen.width() * .09f) {
                 return Zone.PLAYER;
             }
             return Zone.CONTENT;
+        }
+
+        private void clipContentTargets() {
+            contentViewport.set(screen);
+            int topControls = 0;
+            int topEdge = screen.top;
+            int bottomEdge = screen.bottom;
+            for (Target target : targets) {
+                if (target.zone == Zone.TOP) {
+                    topControls++;
+                    topEdge = Math.max(topEdge, target.bounds.bottom);
+                } else if (target.zone == Zone.PLAYER) {
+                    bottomEdge = Math.min(bottomEdge, target.bounds.top - minimumVisibleHeight / 3);
+                }
+            }
+            if (topControls >= 2) contentViewport.top = topEdge;
+            contentViewport.bottom = bottomEdge;
+            obscuredContent.clear();
+            targets.removeIf(target -> {
+                if (target.zone != Zone.CONTENT) return false;
+                if (!hasVisibleContent(target.bounds, contentViewport, minimumVisibleHeight)) {
+                    obscuredContent.add(target);
+                    return true;
+                }
+                target.bounds.intersect(contentViewport);
+                return false;
+            });
+        }
+
+        private static boolean hasVisibleContent(Rect bounds, Rect viewport, int minimumHeight) {
+            int visibleHeight = Math.min(bounds.bottom, viewport.bottom) - Math.max(bounds.top, viewport.top);
+            boolean touchesEdge = bounds.top <= viewport.top || bounds.bottom >= viewport.bottom;
+            return visibleHeight * 3 >= bounds.height() * 2 && (!touchesEdge || visibleHeight >= minimumHeight);
         }
 
         private Target firstInZone(Zone destination, Target previous, Target origin) {
@@ -431,7 +643,7 @@ public final class TvControls {
             if (!bounds.intersect(screen)) return;
 
             if (ComposeNodes.isHost(view)) {
-                ComposeNodes.collect(view, screen, targets, scrollers);
+                composeLogin |= ComposeNodes.collect(view, screen, targets, scrollers);
             } else {
                 boolean scrollable = view.canScrollVertically(1) || view.canScrollVertically(-1)
                         || view.canScrollHorizontally(1) || view.canScrollHorizontally(-1);
@@ -448,9 +660,13 @@ public final class TvControls {
         }
 
         private Target inDirection(Rect origin, int direction) {
+            return inDirection(origin, direction, targets);
+        }
+
+        private Target inDirection(Rect origin, int direction, List<Target> candidates) {
             Target nearest = null;
             double min = Double.POSITIVE_INFINITY;
-            for (Target candidate : targets) {
+            for (Target candidate : candidates) {
                 if (candidate.zone != zone) continue;
                 double score = distance(origin, candidate.bounds, direction);
                 if (score < min) {
@@ -470,6 +686,8 @@ public final class TvControls {
             int separation = horizontal
                     ? Math.max(to.top - from.bottom, from.top - to.bottom)
                     : Math.max(to.left - from.right, from.left - to.right);
+            // Horizontal input stays on the current row, including a title's own overflow button.
+            if (horizontal && separation >= 0) return Double.POSITIVE_INFINITY;
             int main = horizontal
                     ? (forward ? to.left - from.right : from.left - to.right)
                     : (forward ? to.top - from.bottom : from.top - to.bottom);
@@ -481,7 +699,7 @@ public final class TvControls {
             return Math.max(main, 0) + .17 * Math.abs(centerDelta) + .28 * cross + 2.8 * Math.max(separation, 0);
         }
 
-        private boolean scroll(int direction) {
+        private boolean scroll(int direction, boolean page) {
             if (zone != Zone.CONTENT || current == null) return false;
             if (pendingScroll != null) return true;
             final Target previous = current;
@@ -495,27 +713,45 @@ public final class TvControls {
             }
             boolean forward = direction == KeyEvent.KEYCODE_DPAD_DOWN || direction == KeyEvent.KEYCODE_DPAD_RIGHT;
             int genericAction = forward ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+            boolean vertical = direction == KeyEvent.KEYCODE_DPAD_UP || direction == KeyEvent.KEYCODE_DPAD_DOWN;
+            Target concealed = !page && vertical ? inDirection(anchor, direction, obscuredContent) : null;
+            float distance = !page && vertical ? rowScrollDistance(previous.originalHeight, concealed == null ? null : concealed.bounds,
+                    contentViewport, forward, minimumVisibleHeight) : 0f;
+            float scrollY = forward ? distance : -distance;
             List<Target> candidates = new ArrayList<>(scrollers);
             candidates.sort((a, b) -> Long.compare(a.area(), b.area()));
             for (Target item : candidates) {
                 if (!item.bounds.contains(anchor.centerX(), anchor.centerY())) continue;
-                if (item.scroll(pageAction, genericAction, direction)) {
+                if (item.scroll(pageAction, genericAction, direction, scrollY)) {
+                    Rect viewport = new Rect(item.bounds);
+                    viewport.intersect(contentViewport);
                     pendingScroll = () -> {
                         pendingScroll = null;
                         if (!active || !refresh(true) || zone != Zone.CONTENT) return;
                         Rect origin = current.sameControl(previous) ? current.bounds
-                                : scrollEntryBounds(anchor, item.bounds, direction);
+                                : scrollEntryBounds(anchor, viewport, direction);
                         Target next = inDirection(origin, direction);
                         if (next != null) {
                             current = next;
                             draw();
                         }
                     };
-                    decor.postDelayed(pendingScroll, SCROLL_SETTLE_MS);
+                    decor.postDelayed(pendingScroll, item.provider == null ? SCROLL_SETTLE_MS : 270L);
                     return true;
                 }
             }
             return false;
+        }
+
+        private static float rowScrollDistance(int anchorHeight, Rect concealed, Rect viewport, boolean down, int minimum) {
+            float distance = Math.max(minimum * 2f, anchorHeight * 1.12f);
+            if (concealed != null) {
+                int rowHeight = Math.max(concealed.height(), anchorHeight);
+                int reveal = down ? concealed.top + rowHeight - viewport.bottom
+                        : viewport.top - (concealed.bottom - rowHeight);
+                distance = Math.max(distance, reveal + minimum / 4f);
+            }
+            return Math.min(viewport.height() * .22f, distance);
         }
 
         private static Rect scrollEntryBounds(Rect anchor, Rect viewport, int direction) {
@@ -578,6 +814,7 @@ public final class TvControls {
         final AccessibilityNodeProvider provider;
         final int id;
         final Rect bounds;
+        final int originalHeight;
         final List<AccessibilityNodeInfo.AccessibilityAction> actions;
         Zone zone = Zone.CONTENT;
 
@@ -587,6 +824,7 @@ public final class TvControls {
             this.provider = provider;
             this.id = id;
             this.bounds = bounds;
+            this.originalHeight = bounds.height();
             this.actions = actions == null ? null : new ArrayList<>(actions);
         }
 
@@ -604,14 +842,22 @@ public final class TvControls {
 
         boolean activate(int action) {
             if (provider != null) return provider.performAction(id, action, null);
+            if (action == AccessibilityNodeInfo.ACTION_CLICK && view instanceof EditText) {
+                if (!view.requestFocus()) return false;
+                InputMethodManager keyboard = view.getContext().getSystemService(InputMethodManager.class);
+                return keyboard != null && keyboard.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
+            }
             if (action == AccessibilityNodeInfo.ACTION_CLICK) return view.performClick();
             if (action == AccessibilityNodeInfo.ACTION_LONG_CLICK) return view.performLongClick();
             return view.performAccessibilityAction(action, null);
         }
 
-        boolean scroll(int pageAction, int genericAction, int direction) {
+        boolean scroll(int pageAction, int genericAction, int direction, float scrollY) {
             if (provider != null) {
-                if (has(pageAction)) return activate(pageAction);
+                if (has(pageAction)) {
+                    Boolean handled = scrollY == 0f ? null : ComposeNodes.scrollBy(view, id, scrollY);
+                    return handled == null ? activate(pageAction) : handled;
+                }
                 // A generic action can scroll the wrong axis, or go forward at the end of a row.
                 return has(genericAction)
                         && !has(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId())
@@ -634,13 +880,63 @@ public final class TvControls {
         private static Method visibleNodes;
         private static Method containsId;
         private static boolean incompatible;
+        private static Method lookupNode;
+        private static Field semanticsNode;
+        private static Field config;
+        private static Method actionFor;
+        private static Object scrollByKey;
+        private static Field actionCallback;
+        private static Method invokeScroll;
+        private static boolean scrollBindingFailed;
 
         static boolean isHost(View view) { return HOST.equals(view.getClass().getName()); }
 
-        static void collect(View view, Rect screen, List<Target> targets, List<Target> scrollers) {
-            if (incompatible) return;
+        static Boolean scrollBy(View view, int id, float y) {
+            if (scrollBindingFailed) return null;
+            try {
+                if (invokeScroll == null) bindScroll(view.getClass().getClassLoader());
+                Object map = visibleNodes.invoke(delegate.get(view));
+                if (map == null) return null;
+                Object entry = lookupNode.invoke(map, id);
+                if (entry == null) return null;
+                Object node = semanticsNode.get(entry);
+                Object action = actionFor.invoke(null, config.get(node), scrollByKey);
+                if (action == null) return null;
+                Object callback = actionCallback.get(action);
+                return callback == null ? null : (Boolean) invokeScroll.invoke(callback, 0f, y);
+            } catch (ReflectiveOperationException | RuntimeException error) {
+                scrollBindingFailed = true;
+                android.util.Log.d("AppleMusicTvFocus", "Compose ScrollBy binding unavailable", error);
+                return null;
+            }
+        }
+
+        private static void bindScroll(ClassLoader loader) throws ReflectiveOperationException {
+            // Build 1614's accessibility delegate uses this same ScrollBy action with a viewport-sized delta.
+            lookupNode = visibleNodes.getReturnType().getDeclaredMethod("b", int.class);
+            lookupNode.setAccessible(true);
+            semanticsNode = Class.forName("w1.A", false, loader).getDeclaredField("a");
+            semanticsNode.setAccessible(true);
+            config = semanticsNode.getType().getDeclaredField("d");
+            config.setAccessible(true);
+            Field scrollKey = Class.forName("w1.p", false, loader).getDeclaredField("d");
+            scrollKey.setAccessible(true);
+            scrollByKey = scrollKey.get(null);
+            actionFor = Class.forName("w1.r", false, loader)
+                    .getDeclaredMethod("a", config.getType(), scrollKey.getType());
+            actionFor.setAccessible(true);
+            actionCallback = Class.forName("w1.a", false, loader).getDeclaredField("b");
+            actionCallback.setAccessible(true);
+            invokeScroll = Class.forName("pi.p", false, loader).getMethod("invoke", Object.class, Object.class);
+            invokeScroll.setAccessible(true);
+        }
+
+        static boolean collect(View view, Rect screen, List<Target> targets, List<Target> scrollers) {
+            if (incompatible) return false;
             AccessibilityNodeProvider provider = view.getAccessibilityNodeProvider();
-            if (provider == null) return;
+            if (provider == null) return false;
+            boolean editable = false;
+            boolean loginLabel = false;
             try {
                 if (delegate == null) {
                     delegate = view.getClass().getDeclaredField("d0");
@@ -654,7 +950,7 @@ public final class TvControls {
                     containsId.setAccessible(true);
                 }
                 Object map = visibleNodes.invoke(delegate.get(view));
-                if (map == null) return;
+                if (map == null) return false;
                 int[] keys = (int[]) mapKeys.get(map);
                 HashSet<Integer> seen = new HashSet<>();
                 for (int id : keys) {
@@ -666,6 +962,9 @@ public final class TvControls {
                         Rect bounds = new Rect();
                         node.getBoundsInScreen(bounds);
                         if (!bounds.intersect(screen)) continue;
+                        editable |= node.isEditable();
+                        loginLabel |= node.isPassword() || (!node.isEditable()
+                                && (isAccountLabel(node.getText()) || isAccountLabel(node.getContentDescription())));
                         Target item = new Target(view, provider, id, bounds, node.getActionList());
                         if (node.isScrollable() || item.has(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
                                 || item.has(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
@@ -687,6 +986,14 @@ public final class TvControls {
                 // Compose can replace the semantics tree during a screen transition.
                 android.util.Log.d("AppleMusicTvFocus", "Semantics snapshot could not be collected", error);
             }
+            return editable && loginLabel;
+        }
+
+        private static boolean isAccountLabel(CharSequence value) {
+            if (value == null) return false;
+            String label = value.toString().toLowerCase(java.util.Locale.ROOT);
+            return label.contains("apple account") || label.contains("apple-account") || label.contains("apple-id")
+                    || label.contains("apple id");
         }
     }
 

@@ -34,7 +34,10 @@ Diese APK lässt sich über die Projektversionen **TV-Remote** und **DPad** inst
 
 - **↑ / ↓** bewegen den Fokus beim Drücken. Ist am oberen oder unteren Rand kein weiteres Element erreichbar und kann der Inhalt nicht weiter scrollen, geht der Fokus zur sichtbaren Menüleiste oder zum Miniplayer. **↑ / ↓ halten** wählt diese Leisten weiterhin direkt. Von dort führt die Pfeiltaste Richtung Mitte zurück zur vorherigen Auswahl im Inhalt, sofern sie noch sichtbar ist.
 - Leicht versetzte Schaltflächen derselben Zeile bleiben mit **← / →** erreichbar. **↑ / ↓** führt zur nächsten erreichbaren Zeile oder am Rand zur Leiste.
+- Titelzeilen, die fast vollständig unter Menü oder Miniplayer liegen, werden beim Fokuswechsel übersprungen. An der sichtbaren Kante scrollt ein kurzer Pfeildruck bei Compose ungefähr um eine Zeile. **Page Up / Page Down** scrollt seitenweise.
 - **⏪ / ⏩** und dedizierte Vorheriger-/Nächster-Tasten senden pro Tastendruck einen Titelsprung an die aktive Android-Mediensitzung. Wiedergabe/Pause verarbeitet Android regulär.
+- **⏹** verwendet Stop, wenn der MediaController der App die Aktion anbietet. Andernfalls pausiert die Taste die Wiedergabe.
+- Auf erkannten Anmeldeformularen bewegen die Pfeiltasten den Zeiger. **OK** klickt auf das Ziel. Die Bildschirmtastatur übernimmt die Pfeiltasten, sobald sie sichtbar ist.
 
 ### Verworfene Ansätze
 

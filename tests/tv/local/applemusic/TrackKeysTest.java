@@ -19,6 +19,7 @@ public final class TrackKeysTest {
         expectPress(keys, KEYCODE_MEDIA_PREVIOUS, 4);
         expectPress(keys, KEYCODE_MEDIA_SKIP_FORWARD, 5);
         expectPress(keys, KEYCODE_MEDIA_SKIP_BACKWARD, 6);
+        expectPress(keys, KEYCODE_MEDIA_STOP, 12);
 
         expectHandled(keys, ACTION_DOWN, KEYCODE_MEDIA_FAST_FORWARD, 0, 7, false);
         expectHandled(keys, ACTION_UP, KEYCODE_MEDIA_FAST_FORWARD, 0, 7, true);
@@ -36,7 +37,7 @@ public final class TrackKeysTest {
 
         List<Integer> expected = Arrays.asList(KEYCODE_MEDIA_NEXT, KEYCODE_MEDIA_PREVIOUS,
                 KEYCODE_MEDIA_NEXT, KEYCODE_MEDIA_PREVIOUS, KEYCODE_MEDIA_NEXT,
-                KEYCODE_MEDIA_PREVIOUS, KEYCODE_MEDIA_PREVIOUS);
+                KEYCODE_MEDIA_PREVIOUS, KEYCODE_MEDIA_STOP, KEYCODE_MEDIA_PREVIOUS);
         if (!commands.equals(expected)) throw new AssertionError("Unexpected track commands: " + commands);
         System.out.println("Track key dispatch checks passed");
     }
