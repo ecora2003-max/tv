@@ -1,4 +1,5 @@
 import android.graphics.Rect;
+import android.view.KeyEvent;
 import java.lang.reflect.Method;
 
 class FocusZonesTest {
@@ -24,8 +25,25 @@ class FocusZonesTest {
         expectZone(zone, screen, playPause, null, "CONTENT");
         if (!(Boolean) anchor.invoke(null, screen, playPause)) throw new AssertionError("Play button should anchor the bar");
         if ((Boolean) anchor.invoke(null, screen, partialCover)) throw new AssertionError("A cover must not anchor the bar");
+        Object content = zone.invoke(null, screen, album, 971);
+        Object top = zone.invoke(null, screen, topNav, 971);
+        Object player = zone.invoke(null, screen, playPause, 971);
+        Method destination = focus.getDeclaredMethod("verticalDestination", content.getClass(), int.class);
+        destination.setAccessible(true);
+        expectDestination(destination, content, KeyEvent.KEYCODE_DPAD_UP, top);
+        expectDestination(destination, content, KeyEvent.KEYCODE_DPAD_DOWN, player);
+        expectDestination(destination, top, KeyEvent.KEYCODE_DPAD_DOWN, content);
+        expectDestination(destination, player, KeyEvent.KEYCODE_DPAD_UP, content);
+        expectDestination(destination, top, KeyEvent.KEYCODE_DPAD_UP, top);
+        expectDestination(destination, player, KeyEvent.KEYCODE_DPAD_DOWN, player);
         System.out.println("Focus zone classification checks passed");
     }
+
+    static void expectDestination(Method method, Object source, int key, Object expected) throws Exception {
+        Object actual = method.invoke(null, source, key);
+        if (actual != expected) throw new AssertionError("Expected " + expected + ", got " + actual);
+    }
+
     static void expectZone(Method method, Rect screen, Rect control, Integer baseline, String expected) throws Exception {
         Object actual = method.invoke(null, screen, control, baseline);
         if (!expected.equals(actual.toString())) throw new AssertionError("Expected " + expected + ", got " + actual);
